@@ -218,32 +218,44 @@ class DL:
         failed = len(res) - success
         log.info(f"[DL] Downloaded {success}/{len(urls)} images, failed: {failed}")
         return success >= 1
-    def _prepare_image(self, path, target_width=None):
-        try:
-            with Image.open(path) as img:
-                img = img.convert("RGB")
-                if target_width and img.width != target_width:
-                    ratio = img.height / img.width
-                    new_height = int(target_width * ratio)
-                    img = img.resize((target_width, new_height), Image.Resampling.LANCZOS)
-                return img.copy()
-        except Exception as e:
-            log.error(f"[DL] Failed to prepare image {path}: {e}")
-            return None
     def _save_pdf_reportlab(self, image_paths, output_path):
         import gc
+        
+        # Determine target width for consistency (max among all images)
+        target_width = 0
+        for img_path in image_paths:
+            try:
+                with Image.open(img_path) as img:
+                    if img.width > target_width:
+                        target_width = img.width
+            except:
+                continue
+        
+        if target_width == 0:
+            target_width = 800
+        
+        # Cap width to prevent massive PDF file size
+        limit = Config.MAX_IMAGE_WIDTH
+        if target_width > limit:
+            target_width = limit
+            
+        log.info(f"[DL] Generating PDF with consistent width: {target_width}")
+            
         # Write directly to file instead of BytesIO buffer to save RAM
         c = canvas.Canvas(str(output_path))
         for img_path in image_paths:
             try:
-                # Get dimensions without loading full image into memory if possible
+                # Get dimensions
                 with Image.open(img_path) as img:
                     w, h = img.size
-                    # No need to keep img open, canvas.drawImage takes the path
                 
-                c.setPageSize((w, h))
+                # Align width and scale height proportionally
+                ratio = target_width / w
+                target_h = h * ratio
+                
+                c.setPageSize((target_width, target_h))
                 # ReportLab handles the file reading/embedding efficiently
-                c.drawImage(str(img_path), 0, 0, width=w, height=h, preserveAspectRatio=True)
+                c.drawImage(str(img_path), 0, 0, width=target_width, height=target_h, preserveAspectRatio=True)
                 c.showPage()
                 # Occasional GC during large PDF creation
                 if len(image_paths) > 20: 
@@ -258,29 +270,46 @@ class DL:
         if not image_paths:
             return None
         
-        limit = max(3500, Config.MAX_IMAGE_WIDTH)
-        
-        try:
-            img1 = Image.open(image_paths[0]).convert('RGB')
-            if img1.width > limit or img1.height > limit:
-                r = min(limit/img1.width, limit/img1.height)
-                img1 = img1.resize((int(img1.width*r), int(img1.height*r)), Image.Resampling.LANCZOS)
-        except Exception as e:
-            log.warning(f"[DL] First page error: {e}")
-            return None
+        # Determine target width (max among all images)
+        target_width = 0
+        for pth in image_paths:
+            try:
+                with Image.open(pth) as img:
+                    if img.width > target_width:
+                        target_width = img.width
+            except:
+                continue
+
+        if target_width == 0:
+            target_width = 800
+
+        limit = Config.MAX_IMAGE_WIDTH
+        if target_width > limit:
+            target_width = limit
+
+        log.info(f"[DL] Creating PDF (Pillow) with consistent width: {target_width}")
 
         processed = []
-        for pth in image_paths[1:]:
-            try:
-                with Image.open(pth) as i:
-                    i = i.convert('RGB')
-                    if i.width > limit or i.height > limit:
-                        r = min(limit/i.width, limit/i.height)
-                        i = i.resize((int(i.width*r), int(i.height*r)), Image.Resampling.LANCZOS)
-                    processed.append(i.copy())
-            except Exception as e:
-                log.warning(f"[DL] Page error: {e}")
+        img1 = None
         
+        for pth in image_paths:
+            try:
+                img = Image.open(pth).convert('RGB')
+                if img.width != target_width:
+                    ratio = target_width / img.width
+                    new_h = int(img.height * ratio)
+                    img = img.resize((target_width, new_h), Image.Resampling.LANCZOS)
+                
+                if img1 is None:
+                    img1 = img
+                else:
+                    processed.append(img)
+            except Exception as e:
+                log.warning(f"[DL] Pillow page error: {e}")
+
+        if not img1:
+            return None
+
         try:
             img1.save(output_path, "PDF", save_all=True, append_images=processed, quality=qual)
         finally:
@@ -303,12 +332,9 @@ class DL:
                 log.warning(f"[DL] No images found in {dir}")
                 return None
             all_pages = []
-            target_width = None
             if first_promo and Path(first_promo).exists():
                 log.info("[DL] Adding first promo image")
                 all_pages.append(Path(first_promo))
-                with Image.open(first_promo) as im:
-                    target_width = im.width
             all_pages.extend(imgs)
             if last_promo and Path(last_promo).exists():
                 log.info("[DL] Adding last promo image")
